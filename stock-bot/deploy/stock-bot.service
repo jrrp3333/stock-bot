@@ -1,0 +1,18 @@
+[Unit]
+Description=Autonomous Stock Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=botuser
+WorkingDirectory=/home/botuser/stock-bot
+Environment=PYTHONUNBUFFERED=1
+Environment=MPLBACKEND=Agg
+ExecStart=/home/botuser/stock-bot/.venv/bin/python /home/botuser/stock-bot/bot.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
