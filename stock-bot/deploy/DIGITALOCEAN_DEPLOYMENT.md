@@ -168,23 +168,23 @@ sudo journalctl -u stock-dashboard -f
 
 ## Step 7: Access the Dashboard
 
-The dashboard binds to `localhost:5000` only (secure by default). To access it from your laptop, create an SSH tunnel:
+The dashboard binds to `localhost:5500` only (secure by default). To access it from your laptop, create an SSH tunnel:
 
 **From your laptop**, open a new terminal and run:
 
 ```bash
-ssh -L 5000:127.0.0.1:5000 root@YOUR_DROPLET_IP
+ssh -L 5500:127.0.0.1:5500 root@YOUR_DROPLET_IP
 ```
 
 Example:
 ```bash
-ssh -L 5000:127.0.0.1:5000 root@123.45.67.89
+ssh -L 5500:127.0.0.1:5500 root@123.45.67.89
 ```
 
 Then open this in your browser:
 
 ```
-http://127.0.0.1:5000
+http://127.0.0.1:5500
 ```
 
 Leave the SSH tunnel open in a terminal while you browse the dashboard. When done, close the terminal with `Ctrl+C`.
@@ -285,10 +285,10 @@ Common issues:
 
 Make sure the SSH tunnel is open:
 ```bash
-ssh -L 5000:127.0.0.1:5000 root@YOUR_DROPLET_IP
+ssh -L 5500:127.0.0.1:5500 root@YOUR_DROPLET_IP
 ```
 
-Then try `http://127.0.0.1:5000` in your browser.
+Then try `http://127.0.0.1:5500` in your browser.
 
 ### Services keep restarting
 
@@ -310,7 +310,7 @@ DigitalOcean Droplet (Ubuntu 24.04 LTS)
   │   └─ bot.py (autonomous mode, scans every 30 min)
   │
   └─ stock-dashboard.service (systemd)
-      └─ dashboard.py (Flask, localhost:5000)
+     └─ dashboard.py (Flask, localhost:5500)
 ```
 
 Both services:

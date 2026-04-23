@@ -37,4 +37,4 @@ Write-Host "Starting bot (autonomous) and dashboard..." -ForegroundColor Green
 Start-Process -FilePath $venvPython -ArgumentList "bot.py" -WorkingDirectory $PSScriptRoot
 Start-Process -FilePath $venvPython -ArgumentList "dashboard.py" -WorkingDirectory $PSScriptRoot
 
-Write-Host "Launched. Dashboard: http://127.0.0.1:5000" -ForegroundColor Green
+Write-Host "Launched. Dashboard: http://127.0.0.1:5500" -ForegroundColor Green

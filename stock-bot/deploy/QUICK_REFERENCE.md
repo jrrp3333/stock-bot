@@ -91,10 +91,10 @@ ps aux | grep python
 
 ```bash
 # Open SSH tunnel in a terminal, leave it open
-ssh -L 5000:127.0.0.1:5000 root@YOUR_DROPLET_IP
+ssh -L 5500:127.0.0.1:5500 root@YOUR_DROPLET_IP
 
 # Then open in browser
-http://127.0.0.1:5000
+http://127.0.0.1:5500
 ```
 
 ---
