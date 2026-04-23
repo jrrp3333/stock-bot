@@ -1,0 +1,9 @@
+alpaca-py
+flask
+python-dotenv
+requests
+schedule
+yfinance
+numpy
+matplotlib
+backtesting
