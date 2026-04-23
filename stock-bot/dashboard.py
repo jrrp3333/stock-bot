@@ -26,27 +26,32 @@ HTML = """
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Trade Bot Dashboard</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #f6f7f1;
-      --panel: #ffffff;
-      --ink: #1b1f18;
-      --muted: #667060;
-      --good: #1f8f4c;
-      --bad: #b9362f;
-      --accent: #2e6de6;
-      --border: #d8ddcf;
+      --bg: #f7f3ef;
+      --panel: #fffdfb;
+      --ink: #2c1f1b;
+      --muted: #76635c;
+      --good: #238254;
+      --bad: #b44337;
+      --accent: #0f5e9c;
+      --border: #eadfd7;
+      --hero-a: #fff5ec;
+      --hero-b: #f5f7ff;
     }
 
     * { box-sizing: border-box; }
 
     body {
       margin: 0;
-      font-family: "Segoe UI", "Trebuchet MS", sans-serif;
+      font-family: "Manrope", "Segoe UI", sans-serif;
       color: var(--ink);
       background:
-        radial-gradient(circle at 80% 10%, #d8e8ff 0%, rgba(216,232,255,0) 40%),
-        radial-gradient(circle at 10% 90%, #ffe5d1 0%, rgba(255,229,209,0) 35%),
+        radial-gradient(circle at 85% 12%, #fcded4 0%, rgba(252,222,212,0) 38%),
+        radial-gradient(circle at 8% 92%, #d7e8ff 0%, rgba(215,232,255,0) 36%),
         var(--bg);
     }
 
@@ -57,23 +62,56 @@ HTML = """
     }
 
     .hero {
-      background: linear-gradient(120deg, #f4f8ff, #fff6ea);
+      background: linear-gradient(120deg, var(--hero-a), var(--hero-b));
       border: 1px solid var(--border);
-      border-radius: 18px;
-      padding: 24px;
-      box-shadow: 0 6px 24px rgba(27,31,24,0.06);
+      border-radius: 22px;
+      padding: 26px;
+      box-shadow: 0 10px 28px rgba(60, 30, 24, 0.08);
       margin-bottom: 18px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      right: -70px;
+      top: -70px;
+      width: 220px;
+      height: 220px;
+      border-radius: 999px;
+      background: radial-gradient(circle, rgba(15,94,156,0.15) 0%, rgba(15,94,156,0) 70%);
+      pointer-events: none;
     }
 
     .hero h1 {
       margin: 0;
-      font-size: 1.8rem;
-      letter-spacing: 0.02em;
+      font-family: "Fraunces", Georgia, serif;
+      font-size: 2rem;
+      letter-spacing: 0.01em;
     }
 
     .hero p {
       margin: 8px 0 0;
       color: var(--muted);
+      max-width: 72ch;
+    }
+
+    .hero-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .pill {
+      background: rgba(255,255,255,0.7);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      font-size: 0.78rem;
+      color: #5a4a43;
+      padding: 6px 10px;
+      backdrop-filter: blur(2px);
     }
 
     .grid {
@@ -86,17 +124,23 @@ HTML = """
     .card {
       background: var(--panel);
       border: 1px solid var(--border);
-      border-radius: 14px;
+      border-radius: 16px;
       padding: 14px;
-      box-shadow: 0 2px 10px rgba(27,31,24,0.05);
+      box-shadow: 0 4px 14px rgba(58, 36, 29, 0.06);
       animation: rise 0.6s ease both;
+      transition: transform 0.18s ease, box-shadow 0.2s ease;
+    }
+
+    .card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 20px rgba(58, 36, 29, 0.1);
     }
 
     .card.balance-showcase {
       grid-column: span 2;
-      background: linear-gradient(135deg, #1f8f4c 0%, #15a34a 100%);
-      border: 2px solid #16a34a;
-      box-shadow: 0 8px 24px rgba(31,143,76,0.25);
+      background: linear-gradient(135deg, #1d8e5a 0%, #28966c 50%, #33a37e 100%);
+      border: 1px solid rgba(255,255,255,0.35);
+      box-shadow: 0 10px 26px rgba(35, 130, 84, 0.28);
       color: white;
     }
 
@@ -130,16 +174,18 @@ HTML = """
     .panel {
       background: var(--panel);
       border: 1px solid var(--border);
-      border-radius: 14px;
+      border-radius: 16px;
       padding: 14px;
-      box-shadow: 0 2px 10px rgba(27,31,24,0.05);
+      box-shadow: 0 4px 14px rgba(58, 36, 29, 0.06);
       margin-bottom: 18px;
       animation: rise 0.7s ease both;
     }
 
     .panel h2 {
       margin: 0 0 10px;
-      font-size: 1.1rem;
+      font-family: "Fraunces", Georgia, serif;
+      font-size: 1.2rem;
+      letter-spacing: 0.01em;
     }
 
     .table-wrap {
@@ -165,6 +211,14 @@ HTML = """
       text-transform: uppercase;
       letter-spacing: 0.07em;
       color: var(--muted);
+    }
+
+    tbody tr:nth-child(even) {
+      background: rgba(245, 234, 228, 0.32);
+    }
+
+    tbody tr:hover {
+      background: rgba(15, 94, 156, 0.07);
     }
 
     .notes {
@@ -203,7 +257,12 @@ HTML = """
   <div class="wrap">
     <section class="hero">
       <h1>Autonomous Trade Dashboard</h1>
-      <p>Live view of closed trades, cumulative profit/loss, and failure research notes.</p>
+      <p>Live view of account health, executed trades, optimization intelligence, and risk posture in one place.</p>
+      <div class="hero-meta">
+        <span class="pill">Mode: {{ account['mode']|upper }}</span>
+        <span class="pill">Universe: {{ stats.total_trades }} closed trades tracked</span>
+        <span class="pill">Refresh: manual browser refresh</span>
+      </div>
     </section>
 
     <section class="grid">
