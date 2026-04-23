@@ -26,6 +26,9 @@ from optimization_agents import (
 )
 from pattern_signals import detect_ohlc_patterns
 
+# Load .env before reading top-level runtime settings.
+load_dotenv()
+
 HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "10"))
 AUTO_START_MODE = os.getenv("AUTO_START_MODE", "interactive").strip().lower()
 
@@ -33,7 +36,6 @@ REQUESTS_SESSION = requests.Session()
 REQUESTS_SESSION.headers.update({"User-Agent": "trade-bot/1.0"})
 
 # ── Load keys ─────────────────────────────────────────────────────────────────
-load_dotenv()
 API_KEY      = os.getenv("ALPACA_API_KEY")
 SECRET_KEY   = os.getenv("ALPACA_SECRET_KEY")
 FINNHUB_KEY  = os.getenv("FINNHUB_API_KEY")
@@ -49,8 +51,7 @@ api = TradingClient(API_KEY, SECRET_KEY, paper=PAPER_TRADING)
 # Finnhub requires us to check ticker by ticker, so we watch these popular ones
 DEFAULT_WATCHLIST = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "JPM",
-    "BAC", "WMT", "UNH", "PFE", "XOM", "CVX", "LMT", "RTX", "BA",
-    "GS", "V", "AMD", "INTC", "DIS", "NFLX", "CRM", "PYPL"
+    "BAC", "WMT"
 ]
 
 _UNIVERSE_ENV = os.getenv("TICKER_UNIVERSE", "").strip()
