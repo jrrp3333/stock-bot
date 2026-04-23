@@ -1,7 +1,8 @@
 import sqlite3
+import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 from researcher import research_failure
 
@@ -29,6 +30,7 @@ def initialize_schema(db_path: Union[str, Path] = DB_PATH) -> None:
                 requested_notional REAL,
                 approved_notional REAL,
                 entry_reason TEXT,
+                attribution_snapshot TEXT,
                 signal_source TEXT NOT NULL,
                 order_id TEXT
             )
@@ -74,6 +76,8 @@ def initialize_schema(db_path: Union[str, Path] = DB_PATH) -> None:
             cur.execute("ALTER TABLE trade_entries ADD COLUMN approved_notional REAL")
         if "entry_reason" not in entry_columns:
             cur.execute("ALTER TABLE trade_entries ADD COLUMN entry_reason TEXT")
+        if "attribution_snapshot" not in entry_columns:
+            cur.execute("ALTER TABLE trade_entries ADD COLUMN attribution_snapshot TEXT")
 
         conn.commit()
     finally:
@@ -92,6 +96,7 @@ def log_entry(
     requested_notional: Optional[float] = None,
     approved_notional: Optional[float] = None,
     entry_reason: Optional[str] = None,
+    attribution_snapshot: Optional[Union[str, dict[str, Any]]] = None,
     order_id: Optional[str] = None,
     timestamp: Optional[Union[datetime, str]] = None,
     db_path: Union[str, Path] = DB_PATH,
@@ -108,6 +113,17 @@ def log_entry(
             entry_dt = datetime.fromisoformat(timestamp)
         except ValueError:
             entry_dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+
+    snapshot_payload: Optional[str]
+    if attribution_snapshot is None:
+        snapshot_payload = None
+    elif isinstance(attribution_snapshot, str):
+        snapshot_payload = attribution_snapshot
+    else:
+        try:
+            snapshot_payload = json.dumps(attribution_snapshot, separators=(",", ":"), default=str)
+        except Exception:
+            snapshot_payload = str(attribution_snapshot)
 
     conn = sqlite3.connect(str(db_path))
     try:
@@ -126,9 +142,10 @@ def log_entry(
                 requested_notional,
                 approved_notional,
                 entry_reason,
+                attribution_snapshot,
                 signal_source,
                 order_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 entry_dt.isoformat(timespec="seconds"),
@@ -142,6 +159,7 @@ def log_entry(
                 float(requested_notional) if requested_notional is not None else None,
                 float(approved_notional) if approved_notional is not None else None,
                 entry_reason,
+                snapshot_payload,
                 signal_source,
                 order_id,
             ),

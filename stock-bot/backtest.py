@@ -15,8 +15,10 @@ Usage
   python backtest.py --period 3y --cash 10000
   python backtest.py --tp 6 --sl 2.5
   python backtest.py --min-confidence 0.45          # relax entry threshold
+    python backtest.py --momentum-weight 0.10         # score-based momentum overlay
   python backtest.py --politician-bias 0.15         # simulate always-on politician signal
   python backtest.py --open-html                    # open interactive Bokeh report
+    python backtest.py --run-calibration              # sweep confidence/momentum/pacing targets
 
 Outputs
 -------
@@ -154,6 +156,8 @@ def _compute_signals(
     ohlc: pd.DataFrame | None = None,
     pattern_mode: str = "off",
     pattern_weight: float = 0.15,
+    momentum_weight: float = 0.0,
+    momentum_lookback_days: int = 3,
 ) -> pd.DataFrame:
     """
     Vectorized replication of all three ensemble agents in optimization_agents.py.
@@ -235,8 +239,18 @@ def _compute_signals(
     # Average agent confidence → ensemble confidence (mirrors live code)
     ens_confidence = ((mb_conf + mr_conf + vr_conf) / 3 + 0.1).clip(upper=0.98)
 
-    # Momentum gate: price > price 5 bars ago (mirrors check_momentum())
-    momentum_ok = close > close.shift(5)
+    # Momentum score path (mirrors scored momentum in bot.py overlay).
+    momentum_lb = max(1, int(momentum_lookback_days))
+    momentum_ret = (close / close.shift(momentum_lb) - 1) * 100
+    momentum_score = (momentum_ret / 4.0).clip(lower=-1.0, upper=1.0).fillna(0.0)
+    mw = max(0.0, min(1.0, float(momentum_weight)))
+    ens_buy_score = ens_buy_score + momentum_score.clip(lower=0.0) * mw
+    ens_sell_score = ens_sell_score + (-momentum_score).clip(lower=0.0) * mw
+
+    # Preserve legacy strict gate when momentum_weight is zero.
+    legacy_momentum_ok = close > close.shift(5)
+    scored_momentum_ok = momentum_score > -0.15
+    momentum_ok = scored_momentum_ok if mw > 0 else legacy_momentum_ok
 
     # Optional pattern overlay from OHLC structure (Week 5-6)
     pattern_bull_score = pd.Series(0.0, index=close.index)
@@ -745,6 +759,7 @@ def _run_model(
     confirmation_weight_threshold: float,
     pattern_mode: str,
     pattern_weight: float,
+    momentum_weight: float,
     spread: float,
     label: str,
 ) -> BacktestRunResult:
@@ -777,6 +792,7 @@ def _run_model(
             ohlc=df,
             pattern_mode=pattern_mode,
             pattern_weight=pattern_weight,
+            momentum_weight=momentum_weight,
         )
 
         n_entries = int(sigs["entry_signal"].sum())
@@ -980,6 +996,181 @@ def _run_pattern_weight_sweep(
     print(f"  {improved_count}/{len(sweep_rows)} weights showed improvement.")
 
 
+def _run_calibration_sweep(
+    *,
+    tickers: list[str],
+    period: str,
+    cash: float,
+    commission: float,
+    tp: float,
+    sl: float,
+    spread: float,
+    politician_bias: float,
+    weights: dict[str, float],
+    confidence_values: list[float],
+    momentum_weights: list[float],
+    pacing_targets: list[int],
+    stable_win_rate_floor: float,
+    top_n: int = 15,
+) -> None:
+    """Quick grid calibration for day-trader thresholds and pacing targets."""
+    print(f"\n{'='*72}")
+    print("  QUICK CALIBRATION SWEEP (confidence x momentum_weight x pacing_target)")
+    print(f"{'='*72}")
+
+    data_cache: dict[str, pd.DataFrame] = {}
+    for ticker in tickers:
+        df = _fetch_ohlcv(ticker, period)
+        if df is not None and len(df) >= 90:
+            data_cache[ticker] = df
+
+    if not data_cache:
+        print("  ❌ No valid data found for calibration run.")
+        return
+
+    combos = [
+        (c, m, p)
+        for c in confidence_values
+        for m in momentum_weights
+        for p in pacing_targets
+    ]
+    print(
+        f"  Universe tickers: {len(data_cache)} | "
+        f"combos: {len(combos)} | "
+        f"stable-win floor: {stable_win_rate_floor:.1f}%"
+    )
+
+    rows: list[dict] = []
+    for conf, mom_w, pace_target in combos:
+        model_rows: list[dict] = []
+        avg_days_parts: list[int] = []
+
+        for ticker, df in data_cache.items():
+            sigs = _compute_signals(
+                df["Close"],
+                weights=weights,
+                min_confidence=conf,
+                politician_bias=politician_bias,
+                entry_model="confirmed",
+                confirmation_mode="boolean",
+                min_confirmations=2,
+                confirmation_weight_threshold=0.6,
+                ohlc=df,
+                pattern_mode="off",
+                pattern_weight=0.0,
+                momentum_weight=mom_w,
+                momentum_lookback_days=3,
+            )
+
+            df_bt = pd.concat([df.copy(), sigs[["entry_signal", "exit_signal"]]], axis=1)
+            stats = Backtest(
+                df_bt,
+                BotStrategy,
+                cash=cash,
+                commission=commission,
+                spread=spread,
+                exclusive_orders=True,
+                trade_on_close=False,
+            ).run(tp_pct=tp, sl_pct=sl)
+            model_rows.append(_extract_row(ticker, stats))
+            avg_days_parts.append(len(df_bt))
+
+        if not model_rows:
+            continue
+
+        agg = _aggregate_model(model_rows)
+        avg_days = float(np.mean(avg_days_parts)) if avg_days_parts else 1.0
+        trades_per_day = float(agg["total_trades"]) / max(1.0, avg_days)
+        target_band_low = max(1.0, pace_target - 2)
+        target_band_high = pace_target + 2
+        in_target_band = target_band_low <= trades_per_day <= target_band_high
+        win_rate = float(agg["trade_wt_win_rate"])
+        if not np.isfinite(win_rate):
+            win_rate = 0.0
+        stable_wr = win_rate >= stable_win_rate_floor
+
+        # Objective favors risk-adjusted return and target-frequency proximity.
+        sharpe = float(agg["avg_sharpe"])
+        if not np.isfinite(sharpe):
+            sharpe = 0.0
+        pf = float(agg["trade_wt_profit_factor"])
+        if not np.isfinite(pf):
+            pf = 0.0
+        max_dd = float(agg["avg_max_dd"])
+        if not np.isfinite(max_dd):
+            max_dd = 0.0
+        avg_return = float(agg["avg_return"])
+        if not np.isfinite(avg_return):
+            avg_return = 0.0
+        avg_sortino = float(agg["avg_sortino"])
+        if not np.isfinite(avg_sortino):
+            avg_sortino = 0.0
+
+        objective = (0.8 * sharpe) + (0.15 * pf) - (0.20 * abs(trades_per_day - pace_target))
+        if not stable_wr:
+            objective -= 0.75
+
+        rows.append(
+            {
+                "min_confidence": conf,
+                "momentum_weight": mom_w,
+                "pacing_target": pace_target,
+                "avg_return": avg_return,
+                "avg_max_dd": max_dd,
+                "avg_sharpe": sharpe,
+                "avg_sortino": avg_sortino,
+                "trade_wt_win_rate": win_rate,
+                "trade_wt_profit_factor": pf,
+                "total_trades": int(agg["total_trades"]),
+                "trades_per_day": trades_per_day,
+                "stable_win_rate": bool(stable_wr),
+                "in_target_band": bool(in_target_band),
+                "objective": objective,
+            }
+        )
+
+    if not rows:
+        print("  ❌ No calibration rows produced.")
+        return
+
+    out_df = pd.DataFrame(rows).sort_values(by="objective", ascending=False)
+    out_path = ROOT / "backtest_calibration_sweep.csv"
+    out_df.to_csv(str(out_path), index=False)
+
+    print(f"\n  📄 Calibration CSV  ->  {out_path.name}")
+    print("\n  Top calibration candidates:")
+    show_cols = [
+        "min_confidence",
+        "momentum_weight",
+        "pacing_target",
+        "trades_per_day",
+        "trade_wt_win_rate",
+        "avg_sharpe",
+        "avg_max_dd",
+        "objective",
+        "stable_win_rate",
+    ]
+    print(out_df[show_cols].head(max(1, int(top_n))).to_string(index=False, justify="left"))
+
+    stable = out_df[out_df["stable_win_rate"] == True]
+    if not stable.empty:
+        best = stable.iloc[0]
+        print(
+            "\n  ✅ Suggested baseline: "
+            f"confidence={best['min_confidence']:.2f}, "
+            f"momentum_weight={best['momentum_weight']:.2f}, "
+            f"pacing_target={int(best['pacing_target'])}, "
+            f"trades/day={best['trades_per_day']:.2f}, "
+            f"win_rate={best['trade_wt_win_rate']:.2f}%, "
+            f"sharpe={best['avg_sharpe']:.2f}"
+        )
+    else:
+        print(
+            "\n  ⚠️ No rows met stable win-rate floor. "
+            "Lower --calibration-stable-win-rate or widen confidence/momentum ranges."
+        )
+
+
 # ── CLI entry point ───────────────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -1009,6 +1200,10 @@ def main() -> None:
     parser.add_argument(
         "--min-confidence", type=float, default=DEFAULT_MIN_CONFIDENCE,
         help="Ensemble confidence threshold",
+    )
+    parser.add_argument(
+        "--momentum-weight", type=float, default=0.10,
+        help="Momentum score contribution weight (0 keeps strict legacy momentum gate)",
     )
     parser.add_argument(
         "--politician-bias", type=float, default=0.0,
@@ -1090,6 +1285,33 @@ def main() -> None:
         "--sweep-weights", nargs="+", type=float, default=[0.05, 0.08, 0.12, 0.16, 0.20],
         help="Pattern weights to sweep (used with --sweep-pattern-weights)",
     )
+    parser.add_argument(
+        "--run-calibration", action="store_true",
+        help="Run quick calibration sweep across confidence/momentum/pacing targets and exit",
+    )
+    parser.add_argument(
+        "--calibration-confidence-values", nargs="+", type=float,
+        default=[0.45, 0.50, 0.55, 0.60],
+        help="Confidence grid for --run-calibration",
+    )
+    parser.add_argument(
+        "--calibration-momentum-weights", nargs="+", type=float,
+        default=[0.00, 0.05, 0.10, 0.15],
+        help="Momentum weight grid for --run-calibration",
+    )
+    parser.add_argument(
+        "--calibration-pacing-targets", nargs="+", type=int,
+        default=[10, 12, 15],
+        help="Pacing target grid for --run-calibration",
+    )
+    parser.add_argument(
+        "--calibration-stable-win-rate", type=float, default=55.0,
+        help="Minimum trade-weighted win rate considered stable during calibration",
+    )
+    parser.add_argument(
+        "--calibration-top-n", type=int, default=12,
+        help="Rows to print from top calibration candidates",
+    )
     args = parser.parse_args()
     spread = max(0.0, args.slippage_bps / 10000.0)
 
@@ -1118,6 +1340,26 @@ def main() -> None:
         )
         return
 
+    # ── Quick threshold calibration sweep (early exit) ───────────────────────
+    if args.run_calibration:
+        _run_calibration_sweep(
+            tickers=tickers,
+            period=args.period,
+            cash=args.cash,
+            commission=args.commission,
+            tp=args.tp,
+            sl=args.sl,
+            spread=spread,
+            politician_bias=args.politician_bias,
+            weights=weights,
+            confidence_values=args.calibration_confidence_values,
+            momentum_weights=args.calibration_momentum_weights,
+            pacing_targets=args.calibration_pacing_targets,
+            stable_win_rate_floor=args.calibration_stable_win_rate,
+            top_n=args.calibration_top_n,
+        )
+        return
+
     print(f"\n{'═'*58}")
     print(f"  BACKTEST  —  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'═'*58}")
@@ -1126,6 +1368,7 @@ def main() -> None:
     print(f"  Cash/ticker:     ${args.cash:,.0f}")
     print(f"  TP / SL:         {args.tp}% / –{args.sl}%")
     print(f"  Min confidence:  {args.min_confidence}")
+    print(f"  Momentum weight: {args.momentum_weight}")
     print(f"  Commission:      {args.commission * 100:.2f}%")
     print(f"  Politician bias: {args.politician_bias}")
     print(f"  Slippage:        {args.slippage_bps:.1f} bps")
@@ -1168,6 +1411,7 @@ def main() -> None:
         confirmation_weight_threshold=args.confirmation_weight_threshold,
         pattern_mode=args.pattern_mode,
         pattern_weight=args.pattern_weight,
+        momentum_weight=args.momentum_weight,
         spread=spread,
         label="Main Backtest",
     )
@@ -1293,6 +1537,7 @@ def main() -> None:
                 confirmation_mode=args.confirmation_mode,
                 min_confirmations=args.min_confirmations,
                 confirmation_weight_threshold=args.confirmation_weight_threshold,
+                momentum_weight=args.momentum_weight,
             )
             df_base = pd.concat([oos_df.copy(), sig_base[["entry_signal", "exit_signal"]]], axis=1)
             stats_base = Backtest(
@@ -1314,6 +1559,7 @@ def main() -> None:
                 confirmation_mode=args.confirmation_mode,
                 min_confirmations=args.min_confirmations,
                 confirmation_weight_threshold=args.confirmation_weight_threshold,
+                momentum_weight=args.momentum_weight,
             )
             df_conf = pd.concat([oos_df.copy(), sig_conf[["entry_signal", "exit_signal"]]], axis=1)
             stats_conf = Backtest(
@@ -1383,6 +1629,7 @@ def main() -> None:
                 ohlc=oos_df,
                 pattern_mode="off",
                 pattern_weight=args.pattern_weight,
+                momentum_weight=args.momentum_weight,
             )
             df_num = pd.concat([oos_df.copy(), sig_numeric[["entry_signal", "exit_signal"]]], axis=1)
             st_num = Backtest(
@@ -1408,6 +1655,7 @@ def main() -> None:
                 ohlc=oos_df,
                 pattern_mode=(args.pattern_mode if args.pattern_mode != "off" else "confirm"),
                 pattern_weight=args.pattern_weight,
+                momentum_weight=args.momentum_weight,
             )
             df_pat = pd.concat([oos_df.copy(), sig_pattern[["entry_signal", "exit_signal"]]], axis=1)
             st_pat = Backtest(

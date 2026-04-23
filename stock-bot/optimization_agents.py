@@ -81,6 +81,307 @@ def _safe_download_close_series(ticker: str, period: str = "1mo"):
         return None
 
 
+def _safe_download_ohlcv(ticker: str, period: str, interval: str):
+    """Fetch OHLCV with defensive handling for yfinance schema differences."""
+    try:
+        data = yf.download(
+            ticker,
+            period=period,
+            interval=interval,
+            progress=False,
+            auto_adjust=True,
+        )
+        if data.empty:
+            return None
+
+        required = ["Open", "High", "Low", "Close", "Volume"]
+        for col in required:
+            if col not in data:
+                return None
+
+        out = data[required].copy()
+        for col in required:
+            block = out[col]
+            if hasattr(block, "ndim") and block.ndim == 2:
+                if block.shape[1] == 0:
+                    return None
+                out[col] = block.iloc[:, 0]
+
+        out = out.astype(float).dropna(how="any")
+        return out if len(out) > 5 else None
+    except Exception:
+        return None
+
+
+def _calc_rsi(series, period: int = 14):
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0.0, np.nan)
+    return 100 - (100 / (1 + rs))
+
+
+class MarketRegimeAgent:
+    """Classifies broad market regime and returns confidence/size multipliers."""
+
+    def __init__(self, benchmark: str = "SPY"):
+        self.benchmark = benchmark
+
+    def assess_market_regime(self) -> Dict[str, Any]:
+        closes = _safe_download_close_series(self.benchmark, period="6mo")
+        if closes is None or len(closes) < 60:
+            return {
+                "regime": "unknown",
+                "confidence_multiplier": 1.0,
+                "sizing_multiplier": 1.0,
+                "reason": "Insufficient benchmark history for regime detection.",
+            }
+
+        ret_20d = float((closes.iloc[-1] - closes.iloc[-21]) / closes.iloc[-21] * 100)
+        ma_50 = float(closes.rolling(50).mean().iloc[-1])
+        price = float(closes.iloc[-1])
+        vol_20 = float(closes.pct_change().tail(20).std() * np.sqrt(252))
+
+        if ret_20d > 2.5 and price > ma_50 and vol_20 < 0.30:
+            return {
+                "regime": "risk_on",
+                "confidence_multiplier": 1.08,
+                "sizing_multiplier": 1.10,
+                "reason": f"{self.benchmark} trend positive with contained volatility.",
+            }
+        if ret_20d < -2.5 and price < ma_50 and vol_20 > 0.35:
+            return {
+                "regime": "risk_off",
+                "confidence_multiplier": 0.90,
+                "sizing_multiplier": 0.80,
+                "reason": f"{self.benchmark} downtrend with elevated volatility.",
+            }
+        return {
+            "regime": "chop",
+            "confidence_multiplier": 0.97,
+            "sizing_multiplier": 0.92,
+            "reason": f"{self.benchmark} in mixed trend/volatility regime.",
+        }
+
+
+class IntradayTimingAgent:
+    """Evaluates intraday timing quality from 15m and 60m structure."""
+
+    def evaluate_entry_timing(self, ticker: str) -> Dict[str, Any]:
+        bars_15m = _safe_download_ohlcv(ticker, period="5d", interval="15m")
+        bars_1h = _safe_download_ohlcv(ticker, period="1mo", interval="60m")
+
+        if bars_15m is None or bars_1h is None or len(bars_15m) < 30 or len(bars_1h) < 30:
+            return {
+                "passed": True,
+                "confidence_delta": 0.0,
+                "buy_score_delta": 0.0,
+                "sell_score_delta": 0.0,
+                "reason": "Insufficient intraday history; no timing adjustment applied.",
+            }
+
+        close_15 = bars_15m["Close"].astype(float)
+        close_1h = bars_1h["Close"].astype(float)
+        rsi_15 = float(_calc_rsi(close_15, period=14).iloc[-1])
+
+        ret_1h_8 = float((close_1h.iloc[-1] - close_1h.iloc[-9]) / close_1h.iloc[-9] * 100)
+        short_high = float(close_15.tail(16).max())
+        pullback_pct = 0.0
+        if short_high > 0:
+            pullback_pct = float((short_high - close_15.iloc[-1]) / short_high * 100)
+
+        buy_score_delta = 0.0
+        sell_score_delta = 0.0
+        confidence_delta = 0.0
+        reason = []
+
+        if ret_1h_8 > 0:
+            buy_score_delta += 0.05
+            reason.append("1h trend up")
+        elif ret_1h_8 < 0:
+            sell_score_delta += 0.04
+            reason.append("1h trend down")
+
+        if 35 <= rsi_15 <= 62:
+            buy_score_delta += 0.04
+            confidence_delta += 0.02
+            reason.append("15m RSI in constructive zone")
+        elif rsi_15 >= 75:
+            sell_score_delta += 0.06
+            confidence_delta -= 0.03
+            reason.append("15m RSI overbought")
+        elif rsi_15 <= 24:
+            confidence_delta -= 0.02
+            reason.append("15m RSI oversold extremes")
+
+        if 0.2 <= pullback_pct <= 1.8 and ret_1h_8 > 0:
+            buy_score_delta += 0.04
+            reason.append("healthy intraday pullback")
+        elif pullback_pct > 3.0:
+            confidence_delta -= 0.03
+            reason.append("deep pullback / potential breakdown")
+
+        passed = confidence_delta > -0.08
+        return {
+            "passed": passed,
+            "confidence_delta": round(confidence_delta, 3),
+            "buy_score_delta": round(buy_score_delta, 3),
+            "sell_score_delta": round(sell_score_delta, 3),
+            "reason": "; ".join(reason) if reason else "neutral intraday timing",
+            "rsi_15": round(rsi_15, 2),
+            "pullback_pct": round(pullback_pct, 2),
+            "ret_1h_8_pct": round(ret_1h_8, 2),
+        }
+
+
+class TradePacingAgent:
+    """Adapts aggressiveness to maintain target trade cadence without overtrading."""
+
+    def get_pacing_adjustment(
+        self,
+        completed_trades: int,
+        target_trades_per_day: int,
+        max_trades_per_day: int,
+        recent_win_rate_pct: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        if completed_trades >= max_trades_per_day:
+            return {
+                "veto": True,
+                "confidence_delta": -0.5,
+                "sizing_multiplier": 0.6,
+                "reason": "Max daily trade cap reached.",
+            }
+
+        pace_ratio = completed_trades / max(1, target_trades_per_day)
+        confidence_delta = 0.0
+        sizing_multiplier = 1.0
+        reason_parts = []
+
+        if pace_ratio < 0.40:
+            confidence_delta += 0.04
+            sizing_multiplier *= 1.06
+            reason_parts.append("below target cadence")
+        elif pace_ratio > 1.00:
+            confidence_delta -= 0.07
+            sizing_multiplier *= 0.88
+            reason_parts.append("above target cadence")
+
+        if recent_win_rate_pct is not None:
+            if recent_win_rate_pct < 40:
+                confidence_delta -= 0.08
+                sizing_multiplier *= 0.82
+                reason_parts.append("recent win rate weak")
+            elif recent_win_rate_pct > 62:
+                confidence_delta += 0.02
+                sizing_multiplier *= 1.04
+                reason_parts.append("recent win rate strong")
+
+        return {
+            "veto": False,
+            "confidence_delta": round(confidence_delta, 3),
+            "sizing_multiplier": round(max(0.7, min(1.2, sizing_multiplier)), 3),
+            "reason": "; ".join(reason_parts) if reason_parts else "pacing neutral",
+        }
+
+
+class ExecutionQualityAgent:
+    """Estimates intraday execution quality and whether to throttle or skip entries."""
+
+    def assess_execution(self, ticker: str, proposed_notional: float) -> Dict[str, Any]:
+        bars_1m = _safe_download_ohlcv(ticker, period="1d", interval="1m")
+        if bars_1m is None or len(bars_1m) < 35:
+            return {
+                "mode": "market",
+                "allowed": True,
+                "confidence_delta": 0.0,
+                "sizing_multiplier": 1.0,
+                "reason": "No intraday microstructure sample; default market mode.",
+            }
+
+        tail = bars_1m.tail(30)
+        close = tail["Close"].astype(float)
+        high = tail["High"].astype(float)
+        low = tail["Low"].astype(float)
+        vol = tail["Volume"].astype(float)
+
+        spread_proxy = float(((high - low) / close.replace(0.0, np.nan)).mean() * 100)
+        dollar_vol = float((close * vol).mean())
+        notional_ratio = float(proposed_notional / max(1.0, dollar_vol))
+
+        if spread_proxy > 1.2 or notional_ratio > 0.08:
+            return {
+                "mode": "skip",
+                "allowed": False,
+                "confidence_delta": -0.12,
+                "sizing_multiplier": 0.7,
+                "reason": (
+                    f"Execution stress high (spread~{spread_proxy:.2f}%, "
+                    f"notional/liquidity~{notional_ratio:.3f})."
+                ),
+            }
+
+        if spread_proxy > 0.55 or notional_ratio > 0.035:
+            return {
+                "mode": "limit_preferred",
+                "allowed": True,
+                "confidence_delta": -0.03,
+                "sizing_multiplier": 0.9,
+                "reason": (
+                    f"Execution caution (spread~{spread_proxy:.2f}%, "
+                    f"notional/liquidity~{notional_ratio:.3f})."
+                ),
+            }
+
+        return {
+            "mode": "market",
+            "allowed": True,
+            "confidence_delta": 0.01,
+            "sizing_multiplier": 1.02,
+            "reason": (
+                f"Execution healthy (spread~{spread_proxy:.2f}%, "
+                f"notional/liquidity~{notional_ratio:.3f})."
+            ),
+        }
+
+
+class AdaptiveWeightingAgent:
+    """Blends baseline and new weights with EWMA and bounded weekly drift."""
+
+    def _normalize(self, weights: Dict[str, float], min_weight: float) -> Dict[str, float]:
+        out = {k: max(min_weight, float(v)) for k, v in weights.items()}
+        total = sum(out.values())
+        if total <= 0:
+            n = max(1, len(out))
+            return {k: round(1.0 / n, 4) for k in out}
+        return {k: round(v / total, 4) for k, v in out.items()}
+
+    def blend_weights(
+        self,
+        previous_weights: Dict[str, float],
+        proposed_weights: Dict[str, float],
+        alpha: float = 0.35,
+        max_weekly_drift: float = 0.08,
+        min_weight: float = 0.05,
+    ) -> Dict[str, float]:
+        alpha = max(0.05, min(0.95, float(alpha)))
+        max_weekly_drift = max(0.01, min(0.5, float(max_weekly_drift)))
+
+        keys = sorted(set(previous_weights.keys()) | set(proposed_weights.keys()))
+        prev = self._normalize({k: previous_weights.get(k, 0.0) for k in keys}, min_weight=min_weight)
+        prop = self._normalize({k: proposed_weights.get(k, 0.0) for k in keys}, min_weight=min_weight)
+
+        blended = {}
+        for k in keys:
+            raw = (1 - alpha) * prev[k] + alpha * prop[k]
+            lower = max(min_weight, prev[k] - max_weekly_drift)
+            upper = min(1.0, prev[k] + max_weekly_drift)
+            blended[k] = min(upper, max(lower, raw))
+
+        return self._normalize(blended, min_weight=min_weight)
+
+
 class MomentumBreakoutAgent:
     """Trend-following agent that looks for short-term breakout continuation."""
 
@@ -481,14 +782,44 @@ class PaperBacktestHarness:
             "weights": new_weights,
         }
 
-    def reweight_and_persist(self, lookback_weeks: int = 26, oos_weeks: int = 8) -> Dict[str, Any]:
+    def reweight_and_persist(
+        self,
+        lookback_weeks: int = 26,
+        oos_weeks: int = 8,
+        adaptive: bool = True,
+        ewma_alpha: float = 0.35,
+        max_weekly_drift: float = 0.08,
+    ) -> Dict[str, Any]:
         result = self.evaluate_out_of_sample(lookback_weeks=lookback_weeks, oos_weeks=oos_weeks)
+
+        proposed_weights = result.get("weights", dict(DEFAULT_AGENT_WEIGHTS))
+        final_weights = dict(proposed_weights)
+        method = "walk_forward_oos"
+
+        if adaptive:
+            prev_state = get_ensemble_weight_state(self.weights_path)
+            previous_weights = prev_state.get("weights", dict(DEFAULT_AGENT_WEIGHTS))
+            blender = AdaptiveWeightingAgent()
+            final_weights = blender.blend_weights(
+                previous_weights=previous_weights,
+                proposed_weights=proposed_weights,
+                alpha=ewma_alpha,
+                max_weekly_drift=max_weekly_drift,
+            )
+            method = "walk_forward_oos_adaptive_ewma"
+
         payload = {
             "updated_at": datetime.utcnow().isoformat(timespec="seconds"),
             "last_reweight_date": datetime.utcnow().date().isoformat(),
-            "method": "walk_forward_oos",
-            "weights": result.get("weights", dict(DEFAULT_AGENT_WEIGHTS)),
+            "method": method,
+            "weights": final_weights,
             "backtest": result,
+            "proposed_weights": proposed_weights,
+            "adaptive": {
+                "enabled": bool(adaptive),
+                "ewma_alpha": float(ewma_alpha),
+                "max_weekly_drift": float(max_weekly_drift),
+            },
         }
         self.weights_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload

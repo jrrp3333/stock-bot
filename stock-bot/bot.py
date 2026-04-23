@@ -20,6 +20,10 @@ from optimization_agents import (
     EntryQualityAgent,
     EnsembleTradingAgent,
     PaperBacktestHarness,
+    MarketRegimeAgent,
+    IntradayTimingAgent,
+    TradePacingAgent,
+    ExecutionQualityAgent,
     generate_optimization_report,
     get_optimization_snapshot,
     get_ensemble_weight_state,
@@ -82,6 +86,15 @@ ENABLE_WEEKLY_AUTO_REWEIGHT = os.getenv("ENABLE_WEEKLY_AUTO_REWEIGHT", "true").l
 BACKTEST_LOOKBACK_WEEKS = int(os.getenv("BACKTEST_LOOKBACK_WEEKS", "26"))
 BACKTEST_OOS_WEEKS = int(os.getenv("BACKTEST_OOS_WEEKS", "8"))
 AUTONOMOUS_INTERVAL_MINUTES = int(os.getenv("AUTONOMOUS_INTERVAL_MINUTES", "30"))
+ENABLE_ADAPTIVE_EWMA_REWEIGHT = os.getenv("ENABLE_ADAPTIVE_EWMA_REWEIGHT", "true").lower() == "true"
+ADAPTIVE_EWMA_ALPHA = float(os.getenv("ADAPTIVE_EWMA_ALPHA", "0.35"))
+MAX_WEEKLY_WEIGHT_DRIFT = float(os.getenv("MAX_WEEKLY_WEIGHT_DRIFT", "0.08"))
+
+# Day-trader throughput and scoring controls.
+ENABLE_ADVANCED_DAYTRADER_AGENTS = os.getenv("ENABLE_ADVANCED_DAYTRADER_AGENTS", "true").lower() == "true"
+TARGET_TRADES_PER_DAY = int(os.getenv("TARGET_TRADES_PER_DAY", "12"))
+MOMENTUM_LOOKBACK_DAYS = int(os.getenv("MOMENTUM_LOOKBACK_DAYS", "3"))
+MOMENTUM_SCORE_WEIGHT = float(os.getenv("MOMENTUM_SCORE_WEIGHT", "0.10"))
 
 # Confirmed entry model (ported from backtest.py)
 ENABLE_CONFIRMED_ENTRY_MODEL = os.getenv("ENABLE_CONFIRMED_ENTRY_MODEL", "true").lower() == "true"
@@ -103,10 +116,10 @@ TREND_MA_PERIOD = 50
 
 # ── Hard Risk Rails (balance-aware) ─────────────────────────────────────────
 MAX_POSITION_PCT_OF_EQUITY = float(os.getenv("MAX_POSITION_PCT_OF_EQUITY", "0.20"))
-MAX_TOTAL_EXPOSURE_PCT_OF_EQUITY = float(os.getenv("MAX_TOTAL_EXPOSURE_PCT_OF_EQUITY", "0.75"))
+MAX_TOTAL_EXPOSURE_PCT_OF_EQUITY = float(os.getenv("MAX_TOTAL_EXPOSURE_PCT_OF_EQUITY", "0.85"))
 MIN_CASH_RESERVE_PCT = float(os.getenv("MIN_CASH_RESERVE_PCT", "0.10"))
-DAILY_LOSS_LIMIT_PCT = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "0.02"))   # 2% daily drawdown halt
-MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", "10"))
+DAILY_LOSS_LIMIT_PCT = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "0.03"))   # 3% daily drawdown halt
+MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", "15"))
 REAL_MONEY_START_BUDGET = float(os.getenv("REAL_MONEY_START_BUDGET", "25.0"))
 HARD_MIN_ORDER_NOTIONAL = float(os.getenv("HARD_MIN_ORDER_NOTIONAL", "1.0"))
 
@@ -150,6 +163,10 @@ risk_agent = RiskAnalysisAgent()
 entry_quality_agent = EntryQualityAgent()
 analysis_agent = TradeAnalysisAgent()
 ensemble_agent = EnsembleTradingAgent()
+market_regime_agent = MarketRegimeAgent()
+intraday_timing_agent = IntradayTimingAgent()
+trade_pacing_agent = TradePacingAgent()
+execution_quality_agent = ExecutionQualityAgent()
 
 
 def get_account_snapshot() -> dict:
@@ -200,6 +217,8 @@ def validate_runtime_config() -> tuple[bool, list[str]]:
         issues.append("DAILY_LOSS_LIMIT_PCT must be in (0, 0.5].")
     if MAX_TRADES_PER_DAY < 1:
         issues.append("MAX_TRADES_PER_DAY must be >= 1.")
+    if not (1 <= TARGET_TRADES_PER_DAY <= MAX_TRADES_PER_DAY):
+        issues.append("TARGET_TRADES_PER_DAY must be in [1, MAX_TRADES_PER_DAY].")
     if HARD_MIN_ORDER_NOTIONAL <= 0:
         issues.append("HARD_MIN_ORDER_NOTIONAL must be > 0.")
     if REAL_MONEY_START_BUDGET <= 0:
@@ -226,6 +245,14 @@ def validate_runtime_config() -> tuple[bool, list[str]]:
         issues.append("MAX_SECTOR_CONCENTRATION_PCT must be in (0, 1].")
     if not (0 < MAX_TOTAL_OPEN_RISK_PCT <= 1):
         issues.append("MAX_TOTAL_OPEN_RISK_PCT must be in (0, 1].")
+    if not (0.05 <= ADAPTIVE_EWMA_ALPHA <= 0.95):
+        issues.append("ADAPTIVE_EWMA_ALPHA must be in [0.05, 0.95].")
+    if not (0.01 <= MAX_WEEKLY_WEIGHT_DRIFT <= 0.50):
+        issues.append("MAX_WEEKLY_WEIGHT_DRIFT must be in [0.01, 0.50].")
+    if MOMENTUM_LOOKBACK_DAYS < 1:
+        issues.append("MOMENTUM_LOOKBACK_DAYS must be >= 1.")
+    if not (0 <= MOMENTUM_SCORE_WEIGHT <= 1):
+        issues.append("MOMENTUM_SCORE_WEIGHT must be in [0, 1].")
     if MAX_CONCURRENT_POSITIONS < 1:
         issues.append("MAX_CONCURRENT_POSITIONS must be >= 1.")
     if not (5 <= len(WATCHLIST) <= 20):
@@ -550,6 +577,9 @@ def maybe_run_weekly_reweight(force: bool = False) -> bool:
     result = harness.reweight_and_persist(
         lookback_weeks=BACKTEST_LOOKBACK_WEEKS,
         oos_weeks=BACKTEST_OOS_WEEKS,
+        adaptive=ENABLE_ADAPTIVE_EWMA_REWEIGHT,
+        ewma_alpha=ADAPTIVE_EWMA_ALPHA,
+        max_weekly_drift=MAX_WEEKLY_WEIGHT_DRIFT,
     )
     ensemble_agent.reload_weights()
     print(f"✅ Ensemble weights updated: {result.get('weights', {})}")
@@ -583,23 +613,140 @@ def get_politician_buys_for_ticker(ticker):
 # STEP B: Check if a stock has positive momentum (price higher than 5 days ago)
 # ──────────────────────────────────────────────────────────────────────────────
 def check_momentum(ticker):
+    signal = get_momentum_signal(ticker, lookback_days=5)
+    return signal["score"] > 0
+
+
+def get_momentum_signal(ticker: str, lookback_days: int = 3) -> dict:
+    """Return normalized momentum score for score-based entry filtering."""
     try:
-        data = yf.download(ticker, period="10d", interval="1d", progress=False)
-        if data.empty or len(data) < 5:
-            return False
+        bars_needed = max(lookback_days + 2, 8)
+        period_days = max(10, bars_needed * 2)
+        data = yf.download(ticker, period=f"{period_days}d", interval="1d", progress=False)
+        if data.empty or len(data) < bars_needed:
+            return {"score": 0.0, "return_pct": 0.0, "reason": "insufficient momentum bars"}
 
         close_col = data["Close"]
         if hasattr(close_col, "ndim") and close_col.ndim == 2:
             close_col = close_col.iloc[:, 0]
         price_today  = float(close_col.iloc[-1])
-        price_5d_ago = float(close_col.iloc[-5])
-        momentum = (price_today - price_5d_ago) / price_5d_ago * 100
+        past_price = float(close_col.iloc[-(lookback_days + 1)])
+        momentum = (price_today - past_price) / past_price * 100 if past_price > 0 else 0.0
+        score = max(-1.0, min(1.0, momentum / 4.0))
 
-        print(f"  📈 {ticker} momentum: {momentum:.2f}%")
-        return momentum > 0
+        print(f"  📈 {ticker} momentum ({lookback_days}d): {momentum:.2f}% (score {score:.2f})")
+        return {
+            "score": round(score, 3),
+            "return_pct": round(momentum, 2),
+            "reason": f"{lookback_days}d return {momentum:.2f}%",
+        }
     except Exception as e:
         print(f"  ⚠️  Could not get price data for {ticker}: {e}")
-        return False
+        return {"score": 0.0, "return_pct": 0.0, "reason": f"momentum error: {e}"}
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def _recompute_action(decision: dict) -> dict:
+    out = dict(decision)
+    buy_score = float(out.get("buy_score", 0.0))
+    sell_score = float(out.get("sell_score", 0.0))
+    if buy_score >= sell_score and buy_score >= 0.55:
+        out["action"] = "buy"
+    elif sell_score > buy_score and sell_score >= 0.55:
+        out["action"] = "sell"
+    else:
+        out["action"] = "hold"
+    out["buy_score"] = round(buy_score, 3)
+    out["sell_score"] = round(sell_score, 3)
+    return out
+
+
+def get_recent_win_rate(lookback_trades: int = 12, lookback_days: int = 30) -> float | None:
+    """Estimate short-horizon win rate for pacing decisions."""
+    try:
+        trades = analysis_agent.get_closed_trades(lookback_days=lookback_days)
+        if not trades:
+            return None
+        recent = trades[:lookback_trades]
+        if len(recent) < 4:
+            return None
+        wins = sum(1 for t in recent if float(t.pnl_percent) > 0)
+        return (wins / len(recent)) * 100.0
+    except Exception:
+        return None
+
+
+def apply_daytrader_overlays(
+    ticker: str,
+    decision: dict,
+    momentum: dict,
+    completed_trades_today: int,
+    recent_win_rate_pct: float | None,
+) -> tuple[dict, dict]:
+    """Apply regime/timing/pacing/execution overlays to the ensemble decision."""
+    out = dict(decision)
+    overlays = {
+        "enabled": ENABLE_ADVANCED_DAYTRADER_AGENTS,
+        "regime": None,
+        "intraday": None,
+        "pacing": None,
+        "execution": None,
+        "veto": False,
+    }
+
+    momentum_score = float(momentum.get("score", 0.0))
+    out["buy_score"] = float(out.get("buy_score", 0.0)) + max(0.0, momentum_score) * MOMENTUM_SCORE_WEIGHT
+    out["sell_score"] = float(out.get("sell_score", 0.0)) + max(0.0, -momentum_score) * MOMENTUM_SCORE_WEIGHT
+    out["reasons"] = list(out.get("reasons", []))
+    out["reasons"].append(f"momentum_score: {momentum_score:.2f}")
+
+    if not ENABLE_ADVANCED_DAYTRADER_AGENTS:
+        out = _recompute_action(out)
+        return out, overlays
+
+    regime = market_regime_agent.assess_market_regime()
+    intraday = intraday_timing_agent.evaluate_entry_timing(ticker)
+    pacing = trade_pacing_agent.get_pacing_adjustment(
+        completed_trades=completed_trades_today,
+        target_trades_per_day=TARGET_TRADES_PER_DAY,
+        max_trades_per_day=MAX_TRADES_PER_DAY,
+        recent_win_rate_pct=recent_win_rate_pct,
+    )
+
+    proposed_notional = get_optimized_position_size(ticker, DEFAULT_BUY_NOTIONAL)
+    execution = execution_quality_agent.assess_execution(ticker, proposed_notional=proposed_notional)
+
+    overlays["regime"] = regime
+    overlays["intraday"] = intraday
+    overlays["pacing"] = pacing
+    overlays["execution"] = execution
+
+    out["buy_score"] += float(intraday.get("buy_score_delta", 0.0))
+    out["sell_score"] += float(intraday.get("sell_score_delta", 0.0))
+
+    confidence = float(out.get("confidence", 0.0))
+    confidence *= float(regime.get("confidence_multiplier", 1.0))
+    confidence += float(intraday.get("confidence_delta", 0.0))
+    confidence += float(pacing.get("confidence_delta", 0.0))
+    confidence += float(execution.get("confidence_delta", 0.0))
+    out["confidence"] = round(_clamp(confidence, 0.05, 0.98), 3)
+
+    out["reasons"].append(f"regime={regime.get('regime')}: {regime.get('reason')}")
+    out["reasons"].append(f"intraday: {intraday.get('reason')}")
+    out["reasons"].append(f"pacing: {pacing.get('reason')}")
+    out["reasons"].append(f"execution: {execution.get('reason')}")
+
+    overlays["veto"] = bool(
+        pacing.get("veto")
+        or (not intraday.get("passed", True))
+        or (not execution.get("allowed", True))
+    )
+
+    out = _recompute_action(out)
+    return out, overlays
 
 
 def _ema(series, span: int):
@@ -829,7 +976,12 @@ def evaluate_entry_decision(ticker: str, has_politician_buy: bool) -> dict:
 # ──────────────────────────────────────────────────────────────────────────────
 # STEP C: Place a buy order on Alpaca
 # ──────────────────────────────────────────────────────────────────────────────
-def place_buy_order(ticker, notional=None, signal_source="politician_bot"):
+def place_buy_order(
+    ticker,
+    notional=None,
+    signal_source="politician_bot",
+    attribution_snapshot: dict | None = None,
+):
     # Use optimized position size if not specified
     if notional is None:
         notional = get_optimized_position_size(ticker, DEFAULT_BUY_NOTIONAL)
@@ -838,7 +990,7 @@ def place_buy_order(ticker, notional=None, signal_source="politician_bot"):
     risk_gate = evaluate_risk_rails_for_buy(ticker, notional)
     if not risk_gate.get("allowed"):
         print(f"  🛑 Risk rails blocked buy for {ticker}: {risk_gate.get('reason')}")
-        return
+        return False
 
     approved_notional = float(risk_gate.get("approved_notional", requested_notional))
     if approved_notional < notional:
@@ -850,7 +1002,7 @@ def place_buy_order(ticker, notional=None, signal_source="politician_bot"):
         owned = [p.symbol for p in positions]
         if ticker in owned:
             print(f"  ⏭️  Already own {ticker}, skipping")
-            return
+            return False
 
         order = MarketOrderRequest(
             symbol=ticker,
@@ -911,6 +1063,7 @@ def place_buy_order(ticker, notional=None, signal_source="politician_bot"):
             requested_notional=requested_notional,
             approved_notional=notional,
             entry_reason=entry_reason,
+            attribution_snapshot=attribution_snapshot,
             signal_source=signal_source,
             order_id=str(getattr(placed, "id", "")) or None,
             timestamp=datetime.now(UTC),
@@ -923,8 +1076,11 @@ def place_buy_order(ticker, notional=None, signal_source="politician_bot"):
         else:
             print(f"  🧾 Logged entry #{row_id} for {ticker} (size {qty:.4f})")
 
+        return True
+
     except Exception as e:
         print(f"  ❌ Order failed for {ticker}: {e}")
+        return False
 
 
 def place_sell_order(ticker: str, qty: float, signal_source: str = "ensemble_exit") -> bool:
@@ -1039,7 +1195,11 @@ def update_dynamic_parameters():
         print(f"⚠️  Could not update dynamic parameters: {e}")
 
 
-def get_optimized_position_size(ticker: str, base_notional: float = 100.0) -> float:
+def get_optimized_position_size(
+    ticker: str,
+    base_notional: float = 100.0,
+    decision_context: dict | None = None,
+) -> float:
     """Position size via % equity, bounded by configured risk-per-trade stop-out limits."""
     account_snapshot = get_account_snapshot()
     effective_equity, _ = get_effective_budget(account_snapshot)
@@ -1049,11 +1209,23 @@ def get_optimized_position_size(ticker: str, base_notional: float = 100.0) -> fl
 
     pct_based = effective_equity * POSITION_SIZE_PCT_OF_EQUITY
     if abs(STOP_LOSS_PCT) <= 0:
-        return pct_based
+        base_size = pct_based
+    else:
+        risk_floor = (effective_equity * MIN_RISK_PER_TRADE_PCT) / (abs(STOP_LOSS_PCT) / 100.0)
+        risk_ceiling = (effective_equity * MAX_RISK_PER_TRADE_PCT) / (abs(STOP_LOSS_PCT) / 100.0)
+        base_size = max(risk_floor, min(pct_based, risk_ceiling))
 
-    risk_floor = (effective_equity * MIN_RISK_PER_TRADE_PCT) / (abs(STOP_LOSS_PCT) / 100.0)
-    risk_ceiling = (effective_equity * MAX_RISK_PER_TRADE_PCT) / (abs(STOP_LOSS_PCT) / 100.0)
-    return max(risk_floor, min(pct_based, risk_ceiling))
+    if not decision_context:
+        return base_size
+
+    confidence = float(decision_context.get("confidence", 0.55))
+    confidence_mult = 0.85 + max(0.0, confidence - 0.5)
+    regime_mult = float(decision_context.get("regime_sizing_multiplier", 1.0))
+    pacing_mult = float(decision_context.get("pacing_sizing_multiplier", 1.0))
+    execution_mult = float(decision_context.get("execution_sizing_multiplier", 1.0))
+
+    adaptive_mult = _clamp(confidence_mult * regime_mult * pacing_mult * execution_mult, 0.6, 1.4)
+    return max(HARD_MIN_ORDER_NOTIONAL, base_size * adaptive_mult)
 
 
 def get_latest_entry_risk_plan(ticker: str) -> dict:
@@ -1112,10 +1284,13 @@ def print_optimization_metrics():
     print(f"  Stop Loss: {STOP_LOSS_PCT}%")
     print(f"  Default Position Size: ${DEFAULT_BUY_NOTIONAL}")
     print(f"  Weekly Auto-Reweight: {ENABLE_WEEKLY_AUTO_REWEIGHT}")
+    print(f"  Adaptive EWMA Reweight: {ENABLE_ADAPTIVE_EWMA_REWEIGHT}")
+    print(f"  EWMA alpha / max weekly drift: {ADAPTIVE_EWMA_ALPHA:.2f} / {MAX_WEEKLY_WEIGHT_DRIFT:.2f}")
     print(f"  Max Position % Equity: {MAX_POSITION_PCT_OF_EQUITY * 100:.1f}%")
     print(f"  Max Total Exposure % Equity: {MAX_TOTAL_EXPOSURE_PCT_OF_EQUITY * 100:.1f}%")
     print(f"  Daily Drawdown Halt: {DAILY_LOSS_LIMIT_PCT * 100:.1f}%")
     print(f"  Max Trades/Day: {MAX_TRADES_PER_DAY}")
+    print(f"  Target Trades/Day: {TARGET_TRADES_PER_DAY}")
     print(f"  Position Size % Equity: {POSITION_SIZE_PCT_OF_EQUITY * 100:.2f}%")
     print(f"  Max Risk/Trade: {MIN_RISK_PER_TRADE_PCT * 100:.2f}%\u2013{MAX_RISK_PER_TRADE_PCT * 100:.2f}% of equity")
     print(f"  Max Concurrent Positions: {MAX_CONCURRENT_POSITIONS}")
@@ -1140,6 +1315,10 @@ def print_optimization_metrics():
     print(
         f"  Pattern Overlay: {ENABLE_PATTERN_OVERLAY} "
         f"(mode={PATTERN_OVERLAY_MODE}, weight={PATTERN_WEIGHT:.2f})"
+    )
+    print(
+        f"  Advanced Day-Trader Agents: {ENABLE_ADVANCED_DAYTRADER_AGENTS} "
+        f"(momentum_lookback={MOMENTUM_LOOKBACK_DAYS}d, momentum_weight={MOMENTUM_SCORE_WEIGHT:.2f})"
     )
 
     try:
@@ -1271,29 +1450,46 @@ def run_bot():
 
     if FORCE_TEST_BUY and not FORCED_BUY_RAN:
         print("🧪 FORCE_TEST_BUY enabled. Placing one controlled test buy...")
-        place_buy_order(
+        bought = place_buy_order(
             FORCE_TEST_BUY_TICKER,
             notional=FORCE_TEST_BUY_NOTIONAL,
             signal_source="forced_test_buy",
+            attribution_snapshot={
+                "source": "forced_test_buy",
+                "note": "manual controlled test entry",
+            },
         )
+        if bought:
+            print("  ✅ Forced test buy executed.")
         FORCED_BUY_RAN = True
 
     print(f"🔍 Scanning {len(WATCHLIST)} tickers for politician activity...\n")
+
+    trades_today = get_today_trade_count()
+    recent_wr = get_recent_win_rate(lookback_trades=12, lookback_days=30)
 
     for ticker in WATCHLIST:
         print(f"--- Checking {ticker} ---")
         buys = get_politician_buys_for_ticker(ticker)
         has_politician_buy = len(buys) > 0
         decision = evaluate_entry_decision(ticker, has_politician_buy)
+        momentum = get_momentum_signal(ticker, lookback_days=MOMENTUM_LOOKBACK_DAYS)
+        decision, overlays = apply_daytrader_overlays(
+            ticker=ticker,
+            decision=decision,
+            momentum=momentum,
+            completed_trades_today=trades_today,
+            recent_win_rate_pct=recent_wr,
+        )
         pattern = evaluate_pattern_overlay(ticker)
         decision = apply_pattern_overlay_to_decision(decision, pattern)
+        decision = _recompute_action(decision)
 
         if buys:
             print(f"  🏛️  {len(buys)} politician buy(s) found!")
             for b in buys:
                 print(f"      → {b.get('name', 'Unknown')} bought on {b.get('transactionDate', '?')}")
 
-        momentum_ok = check_momentum(ticker)
         confirmation = evaluate_entry_confirmations(ticker)
         print(
             "  🧪 Entry confirm: "
@@ -1308,32 +1504,85 @@ def run_bot():
             f"bull={pattern['bull_score']:.2f} bear={pattern['bear_score']:.2f} "
             f"reason={pattern['reason']}"
         )
+        print(
+            "  ⚙️ Day-trader overlays: "
+            f"veto={overlays['veto']} conf={decision['confidence']} "
+            f"momentum={momentum['score']:.2f} "
+            f"regime={((overlays.get('regime') or {}).get('regime', 'n/a'))} "
+            f"exec={((overlays.get('execution') or {}).get('mode', 'n/a'))}"
+        )
+
+        sizing_context = {
+            "confidence": decision["confidence"],
+            "regime_sizing_multiplier": float((overlays.get("regime") or {}).get("sizing_multiplier", 1.0)),
+            "pacing_sizing_multiplier": float((overlays.get("pacing") or {}).get("sizing_multiplier", 1.0)),
+            "execution_sizing_multiplier": float((overlays.get("execution") or {}).get("sizing_multiplier", 1.0)),
+        }
+        adaptive_notional = get_optimized_position_size(
+            ticker,
+            DEFAULT_BUY_NOTIONAL,
+            decision_context=sizing_context,
+        )
+        attribution_snapshot = {
+            "ticker": ticker,
+            "timestamp_utc": datetime.now(UTC).isoformat(timespec="seconds"),
+            "decision": {
+                "action": decision.get("action"),
+                "buy_score": decision.get("buy_score"),
+                "sell_score": decision.get("sell_score"),
+                "confidence": decision.get("confidence"),
+                "reasons": decision.get("reasons", []),
+            },
+            "momentum": momentum,
+            "confirmation": confirmation,
+            "pattern": pattern,
+            "overlays": overlays,
+            "sizing_context": sizing_context,
+            "adaptive_notional": round(float(adaptive_notional), 2),
+        }
 
         if (
             decision["action"] == "buy"
             and decision["confidence"] >= MIN_ENSEMBLE_CONFIDENCE
-            and momentum_ok
+            and float(momentum.get("score", 0.0)) > -0.15
             and confirmation["passed"]
             and pattern["passed"]
+            and not overlays["veto"]
         ):
             print(
                 f"  🟢 Ensemble BUY (score {decision['buy_score']}, conf {decision['confidence']})"
             )
-            place_buy_order(ticker, signal_source="ensemble_day_trader")
+            bought = place_buy_order(
+                ticker,
+                notional=adaptive_notional,
+                signal_source="ensemble_day_trader",
+                attribution_snapshot=attribution_snapshot,
+            )
+            if bought:
+                trades_today += 1
         elif (
             has_politician_buy
-            and momentum_ok
+            and float(momentum.get("score", 0.0)) >= -0.05
             and decision["confidence"] >= 0.45
             and confirmation["passed"]
             and pattern["passed"]
+            and not overlays["veto"]
         ):
             print("  🟡 Fallback BUY: politician signal + momentum + moderate confidence")
-            place_buy_order(ticker, signal_source="politician_momentum_fallback")
+            bought = place_buy_order(
+                ticker,
+                notional=adaptive_notional,
+                signal_source="politician_momentum_fallback",
+                attribution_snapshot=attribution_snapshot,
+            )
+            if bought:
+                trades_today += 1
         else:
             print(
                 f"  ⬜ HOLD ({decision['action']}, buy {decision['buy_score']}, "
                 f"sell {decision['sell_score']}, conf {decision['confidence']}, "
-                f"confirm={confirmation['passed']}, pattern={pattern['passed']})"
+                f"confirm={confirmation['passed']}, pattern={pattern['passed']}, "
+                f"veto={overlays['veto']})"
             )
 
     print("\n✅ Bot run complete.\n")
