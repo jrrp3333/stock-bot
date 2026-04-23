@@ -18,6 +18,13 @@ DASHBOARD_DEBUG = os.getenv("DASHBOARD_DEBUG", "false").lower() == "true"
 
 app = Flask(__name__)
 
+
+def _fmt_money0(value):
+  try:
+    return f"{float(value):,.0f}"
+  except (TypeError, ValueError):
+    return "0"
+
 HTML = """
 <!doctype html>
 <html lang="en">
@@ -31,16 +38,19 @@ HTML = """
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #f7f3ef;
-      --panel: #fffdfb;
-      --ink: #2c1f1b;
-      --muted: #76635c;
-      --good: #238254;
-      --bad: #b44337;
-      --accent: #0f5e9c;
-      --border: #eadfd7;
-      --hero-a: #fff5ec;
-      --hero-b: #f5f7ff;
+      --bg: #05080e;
+      --bg-soft: #0a111c;
+      --panel: rgba(14, 22, 34, 0.76);
+      --panel-strong: rgba(18, 29, 43, 0.86);
+      --ink: #e1eaf5;
+      --muted: #94a8bf;
+      --good: #39d98a;
+      --bad: #ff6b7a;
+      --accent: #67c4e8;
+      --border: rgba(124, 160, 196, 0.22);
+      --hero-a: rgba(10, 20, 35, 0.92);
+      --hero-b: rgba(5, 10, 18, 0.98);
+      --glow: rgba(103, 196, 232, 0.12);
     }
 
     * { box-sizing: border-box; }
@@ -50,9 +60,10 @@ HTML = """
       font-family: "Manrope", "Segoe UI", sans-serif;
       color: var(--ink);
       background:
-        radial-gradient(circle at 85% 12%, #fcded4 0%, rgba(252,222,212,0) 38%),
-        radial-gradient(circle at 8% 92%, #d7e8ff 0%, rgba(215,232,255,0) 36%),
-        var(--bg);
+        radial-gradient(circle at 88% 10%, rgba(49, 150, 212, 0.11) 0%, rgba(49,150,212,0) 44%),
+        radial-gradient(circle at 8% 92%, rgba(57, 217, 138, 0.07) 0%, rgba(57,217,138,0) 40%),
+        linear-gradient(145deg, #04060c 0%, var(--bg-soft) 45%, #04070d 100%);
+      min-height: 100vh;
     }
 
     .wrap {
@@ -65,11 +76,12 @@ HTML = """
       background: linear-gradient(120deg, var(--hero-a), var(--hero-b));
       border: 1px solid var(--border);
       border-radius: 22px;
-      padding: 26px;
-      box-shadow: 0 10px 28px rgba(60, 30, 24, 0.08);
+      padding: 20px 24px;
+      box-shadow: 0 14px 30px rgba(2, 7, 14, 0.5), inset 0 1px 0 rgba(150, 185, 220, 0.12);
       margin-bottom: 18px;
       position: relative;
       overflow: hidden;
+      backdrop-filter: blur(6px);
     }
 
     .hero::after {
@@ -80,38 +92,33 @@ HTML = """
       width: 220px;
       height: 220px;
       border-radius: 999px;
-      background: radial-gradient(circle, rgba(15,94,156,0.15) 0%, rgba(15,94,156,0) 70%);
+      background: radial-gradient(circle, rgba(103,196,232,0.12) 0%, rgba(103,196,232,0) 72%);
       pointer-events: none;
     }
 
     .hero h1 {
       margin: 0;
       font-family: "Fraunces", Georgia, serif;
-      font-size: 2rem;
+      font-size: 1.75rem;
       letter-spacing: 0.01em;
-    }
-
-    .hero p {
-      margin: 8px 0 0;
-      color: var(--muted);
-      max-width: 72ch;
+      text-shadow: 0 1px 10px rgba(103, 196, 232, 0.1);
     }
 
     .hero-meta {
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
-      margin-top: 14px;
+      margin-top: 0;
     }
 
     .pill {
-      background: rgba(255,255,255,0.7);
+      background: rgba(7, 16, 28, 0.72);
       border: 1px solid var(--border);
       border-radius: 999px;
       font-size: 0.78rem;
-      color: #5a4a43;
+      color: #aabdd2;
       padding: 6px 10px;
-      backdrop-filter: blur(2px);
+      backdrop-filter: blur(4px);
     }
 
     .grid {
@@ -126,32 +133,53 @@ HTML = """
       border: 1px solid var(--border);
       border-radius: 16px;
       padding: 14px;
-      box-shadow: 0 4px 14px rgba(58, 36, 29, 0.06);
+      box-shadow: 0 7px 18px rgba(2, 8, 16, 0.38), inset 0 1px 0 rgba(129, 166, 205, 0.09);
       animation: rise 0.6s ease both;
       transition: transform 0.18s ease, box-shadow 0.2s ease;
+      backdrop-filter: blur(5px);
     }
 
     .card:hover {
       transform: translateY(-2px);
-      box-shadow: 0 8px 20px rgba(58, 36, 29, 0.1);
+      box-shadow: 0 11px 22px rgba(5, 14, 27, 0.48), 0 0 0 1px rgba(103, 196, 232, 0.11);
     }
 
     .card.balance-showcase {
       grid-column: span 2;
-      background: linear-gradient(135deg, #1d8e5a 0%, #28966c 50%, #33a37e 100%);
-      border: 1px solid rgba(255,255,255,0.35);
-      box-shadow: 0 10px 26px rgba(35, 130, 84, 0.28);
+      background: linear-gradient(132deg, rgba(22, 93, 69, 0.9) 0%, rgba(18, 80, 118, 0.9) 56%, rgba(8, 36, 58, 0.95) 100%);
+      border: 1px solid rgba(126, 234, 186, 0.34);
+      box-shadow: 0 12px 22px rgba(11, 39, 63, 0.38), inset 0 1px 0 rgba(180, 255, 227, 0.14);
       color: white;
+      padding: 20px 22px 18px;
     }
 
     .card.balance-showcase h3 {
-      color: rgba(255,255,255,0.85);
+      margin: 0;
+      color: rgba(232, 252, 245, 0.9);
+      font-size: 0.78rem;
+      letter-spacing: 0.14em;
     }
 
     .card.balance-showcase .metric {
       color: white;
-      font-size: 2.2rem;
-      text-shadow: 0 2px 8px rgba(0,0,0,0.15);
+      margin-top: 4px;
+      line-height: 1;
+      font-size: clamp(2.7rem, 4.4vw, 3.5rem);
+      letter-spacing: -0.01em;
+      text-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
+    }
+
+    .balance-subline {
+      margin-top: 10px;
+      color: rgba(228, 248, 255, 0.86);
+      font-size: 0.82rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .balance-subline strong {
+      color: #f4feff;
+      font-weight: 700;
     }
 
     .card h3 {
@@ -172,13 +200,14 @@ HTML = """
     .bad { color: var(--bad); }
 
     .panel {
-      background: var(--panel);
+      background: var(--panel-strong);
       border: 1px solid var(--border);
       border-radius: 16px;
       padding: 14px;
-      box-shadow: 0 4px 14px rgba(58, 36, 29, 0.06);
+      box-shadow: 0 8px 20px rgba(3, 10, 20, 0.4), inset 0 1px 0 rgba(140, 173, 208, 0.1);
       margin-bottom: 18px;
       animation: rise 0.7s ease both;
+      backdrop-filter: blur(8px);
     }
 
     .panel h2 {
@@ -214,17 +243,73 @@ HTML = """
     }
 
     tbody tr:nth-child(even) {
-      background: rgba(245, 234, 228, 0.32);
+      background: rgba(17, 29, 45, 0.5);
     }
 
     tbody tr:hover {
-      background: rgba(15, 94, 156, 0.07);
+      background: rgba(103, 196, 232, 0.07);
     }
 
     .notes {
       max-width: 340px;
       white-space: normal;
-      color: #3d4637;
+      color: #ced9e6;
+    }
+
+    .chart-toolbar {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+
+    .chart-toggle {
+      border: 1px solid var(--border);
+      background: rgba(7, 16, 28, 0.76);
+      color: #c7d8ea;
+      border-radius: 999px;
+      padding: 6px 12px;
+      font-size: 0.78rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: all 0.18s ease;
+    }
+
+    .chart-toggle:hover {
+      border-color: rgba(103, 196, 232, 0.42);
+      color: #eef8ff;
+      box-shadow: 0 0 0 1px rgba(103, 196, 232, 0.1);
+    }
+
+    .chart-toggle.active {
+      background: linear-gradient(130deg, rgba(38, 139, 95, 0.85), rgba(29, 90, 130, 0.86));
+      color: #f3feff;
+      border-color: rgba(162, 234, 255, 0.4);
+      box-shadow: 0 6px 14px rgba(8, 32, 49, 0.36);
+    }
+
+    .bottom-meta {
+      margin-top: 22px;
+      margin-bottom: 8px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      border: 1px solid var(--border);
+      background: rgba(10, 18, 29, 0.72);
+      box-shadow: inset 0 1px 0 rgba(120, 160, 196, 0.08);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px 16px;
+      flex-wrap: wrap;
+    }
+
+    .bottom-meta p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.86rem;
+      line-height: 1.4;
     }
 
     @keyframes rise {
@@ -250,6 +335,12 @@ HTML = """
       .card.balance-showcase {
         grid-column: span 1;
       }
+      .card.balance-showcase .metric {
+        font-size: 2.35rem;
+      }
+      .bottom-meta {
+        padding: 10px 12px;
+      }
     }
   </style>
 </head>
@@ -257,20 +348,26 @@ HTML = """
   <div class="wrap">
     <section class="hero">
       <h1>Autonomous Trade Dashboard</h1>
-      <p>Live view of account health, executed trades, optimization intelligence, and risk posture in one place.</p>
-      <div class="hero-meta">
-        <span class="pill">Mode: {{ account['mode']|upper }}</span>
-        <span class="pill">Universe: {{ stats.total_trades }} closed trades tracked</span>
-        <span class="pill">Refresh: manual browser refresh</span>
-      </div>
     </section>
 
     <section class="grid">
-      <article class="card balance-showcase"><h3>💰 Account Balance</h3><p class="metric">${{ '%.0f'|format(account['equity']) }}</p></article>
+      <article class="card balance-showcase">
+        <h3>Account Balance</h3>
+        <p class="metric">${{ money(account['equity']) }}</p>
+        <p class="balance-subline">Cash <strong>${{ money(account['cash']) }}</strong> • Buying Power <strong>${{ money(account['buying_power']) }}</strong></p>
+      </article>
       <article class="card"><h3>Total Trades</h3><p class="metric">{{ stats.total_trades }}</p></article>
       <article class="card"><h3>Win Rate</h3><p class="metric">{{ stats.win_rate }}%</p></article>
-      <article class="card"><h3>Avg PnL</h3><p class="metric {{ 'good' if stats.avg_pnl >= 0 else 'bad' }}">{{ stats.avg_pnl }}%</p></article>
       <article class="card"><h3>Cumulative PnL</h3><p class="metric {{ 'good' if stats.total_pnl >= 0 else 'bad' }}">{{ stats.total_pnl }}%</p></article>
+    </section>
+
+    <section class="panel">
+      <h2>PnL by Trade</h2>
+      <div class="chart-toolbar">
+        <button type="button" class="chart-toggle active" data-chart-type="line">Line</button>
+        <button type="button" class="chart-toggle" data-chart-type="bar">Bar</button>
+      </div>
+      <canvas id="pnlChart" height="80"></canvas>
     </section>
 
     <section class="panel">
@@ -290,17 +387,17 @@ HTML = """
           <tbody>
             <tr>
               <td>{{ account['mode'] }}</td>
-              <td>{{ '%.2f'|format(account['equity']) }}</td>
-              <td>{{ '%.2f'|format(account['cash']) }}</td>
-              <td>{{ '%.2f'|format(account['buying_power']) }}</td>
-              <td>{{ '%.2f'|format(account['effective_equity']) }}</td>
-              <td>{{ '%.2f'|format(account['effective_cash']) }}</td>
+              <td>${{ money(account['equity']) }}</td>
+              <td>${{ money(account['cash']) }}</td>
+              <td>${{ money(account['buying_power']) }}</td>
+              <td>${{ money(account['effective_equity']) }}</td>
+              <td>${{ money(account['effective_cash']) }}</td>
             </tr>
           </tbody>
         </table>
       </div>
-      <p style="margin:10px 0 0;color:#667060;">
-        Live mode budget cap: ${{ '%.2f'|format(account['real_money_start_budget']) }} (applies only when PAPER_TRADING=false).
+      <p style="margin:10px 0 0;color:#9cb1c9;">
+        Live mode budget cap: ${{ money(account['real_money_start_budget']) }} (applies only when PAPER_TRADING=false).
       </p>
     </section>
 
@@ -401,14 +498,9 @@ HTML = """
           </tbody>
         </table>
       </div>
-      <p style="margin:10px 0 0;color:#667060;">
+      <p style="margin:10px 0 0;color:#9cb1c9;">
         Last reweight: {{ weight_state.get('last_reweight_date') or 'never' }}
       </p>
-    </section>
-
-    <section class="panel">
-      <h2>PnL by Trade</h2>
-      <canvas id="pnlChart" height="80"></canvas>
     </section>
 
     <section class="panel">
@@ -431,9 +523,9 @@ HTML = """
               <tr>
                 <td>{{ p['symbol'] }}</td>
                 <td>{{ p['qty'] }}</td>
-                <td>{{ '%.2f'|format(p['avg_entry_price']) }}</td>
-                <td>{{ '%.2f'|format(p['current_price']) }}</td>
-                <td>{{ '%.2f'|format(p['market_value']) }}</td>
+                <td>${{ money(p['avg_entry_price']) }}</td>
+                <td>${{ money(p['current_price']) }}</td>
+                <td>${{ money(p['market_value']) }}</td>
                 <td class="{{ 'good' if p['unrealized_plpc'] >= 0 else 'bad' }}">{{ '%.2f'|format(p['unrealized_plpc']) }}</td>
               </tr>
               {% endfor %}
@@ -469,7 +561,7 @@ HTML = """
                 <td>{{ e['id'] }}</td>
                 <td>{{ e['timestamp'] }}</td>
                 <td>{{ e['ticker'] }}</td>
-                <td>{{ '%.2f'|format(e['entry_price']) }}</td>
+                <td>${{ money(e['entry_price']) }}</td>
                 <td>{{ e['qty'] }}</td>
                 <td>{{ e['signal_source'] }}</td>
                 <td>{{ e['order_id'] or '' }}</td>
@@ -508,8 +600,8 @@ HTML = """
               <td>{{ t['id'] }}</td>
               <td>{{ t['timestamp'] }}</td>
               <td>{{ t['ticker'] }}</td>
-              <td>{{ '%.2f'|format(t['entry_price']) }}</td>
-              <td>{{ '%.2f'|format(t['exit_price']) }}</td>
+              <td>${{ money(t['entry_price']) }}</td>
+              <td>${{ money(t['exit_price']) }}</td>
               <td>{{ t['qty'] }}</td>
               <td>{{ t['signal_source'] }}</td>
               <td class="{{ 'good' if t['pnl_percent'] >= 0 else 'bad' }}">{{ '%.2f'|format(t['pnl_percent']) }}</td>
@@ -520,40 +612,119 @@ HTML = """
         </table>
       </div>
     </section>
+
+    <section class="bottom-meta">
+      <p>Live view of account health, executed trades, optimization intelligence, and risk posture in one place.</p>
+      <div class="hero-meta">
+        <span class="pill">Mode: {{ account['mode']|upper }}</span>
+        <span class="pill">Universe: {{ stats.total_trades }} closed trades tracked</span>
+        <span class="pill">Refresh: manual browser refresh</span>
+      </div>
+    </section>
   </div>
 
   <script>
     const labels = {{ labels|tojson }};
     const values = {{ values|tojson }};
-    const colors = values.map(v => v >= 0 ? "#1f8f4c" : "#b9362f");
+    const pnlCanvas = document.getElementById("pnlChart");
+    const toggles = Array.from(document.querySelectorAll(".chart-toggle"));
+    const pointColors = values.map(v => v >= 0 ? "#39d98a" : "#ff6b7a");
+    let pnlChart;
 
-    new Chart(document.getElementById("pnlChart"), {
-      type: "bar",
-      data: {
-        labels,
-        datasets: [{
-          label: "PnL %",
-          data: values,
-          backgroundColor: colors,
-          borderRadius: 6
-        }]
-      },
-      options: {
-        animation: { duration: 700 },
-        plugins: {
-          legend: { display: false }
-        },
+    function xTickStep() {
+      return window.matchMedia("(max-width: 640px)").matches ? 6 : 3;
+    }
+
+    function baseOptions() {
+      return {
+        animation: { duration: 650 },
+        plugins: { legend: { display: false } },
         scales: {
           y: {
-            title: { display: true, text: "Percent" },
-            grid: { color: "rgba(80,90,80,0.1)" }
+            title: { display: true, text: "Percent", color: "#a9bfd8" },
+            grid: { color: "rgba(125, 170, 210, 0.16)" },
+            ticks: { color: "#d5e4f5" }
           },
           x: {
-            grid: { display: false }
+            grid: { display: false },
+            ticks: {
+              color: "#a9bfd8",
+              callback: function(value, index) {
+                const step = xTickStep();
+                return index % step === 0 ? this.getLabelForValue(value) : "";
+              }
+            }
           }
         }
+      };
+    }
+
+    function datasetFor(type) {
+      if (type === "line") {
+        return {
+          label: "PnL %",
+          data: values,
+          borderColor: "#73d6ff",
+          backgroundColor: "rgba(115, 214, 255, 0.08)",
+          pointBackgroundColor: pointColors,
+          pointBorderColor: "rgba(8, 13, 22, 0.9)",
+          pointBorderWidth: 1,
+          pointRadius: 3,
+          pointHoverRadius: 5,
+          borderWidth: 2,
+          tension: 0.32,
+          fill: false
+        };
       }
+
+      return {
+        label: "PnL %",
+        data: values,
+        backgroundColor: pointColors,
+        borderRadius: 6
+      };
+    }
+
+    function renderChart(type) {
+      if (pnlChart) {
+        pnlChart.destroy();
+      }
+
+      pnlChart = new Chart(pnlCanvas, {
+        type,
+        data: {
+          labels,
+          datasets: [datasetFor(type)]
+        },
+        options: baseOptions()
+      });
+
+      toggles.forEach(btn => {
+        btn.classList.toggle("active", btn.dataset.chartType === type);
+      });
+
+      try {
+        localStorage.setItem("pnlChartType", type);
+      } catch (err) {
+        // Ignore storage failures in private browsing or restricted contexts.
+      }
+    }
+
+    toggles.forEach(btn => {
+      btn.addEventListener("click", () => renderChart(btn.dataset.chartType));
     });
+
+    let preferredChart = "line";
+    try {
+      const saved = localStorage.getItem("pnlChartType");
+      if (saved === "line" || saved === "bar") {
+        preferredChart = saved;
+      }
+    } catch (err) {
+      // Keep default when storage is unavailable.
+    }
+
+    renderChart(preferredChart);
   </script>
 </body>
 </html>
@@ -738,6 +909,7 @@ def index():
         signal_sources=signal_sources,
         weight_state=weight_state,
         weight_rows=weight_rows,
+      money=_fmt_money0,
     )
 
 
@@ -777,5 +949,5 @@ def api_health():
 
 if __name__ == "__main__":
     initialize_schema()
-    app.run(host="127.0.0.1", port=5000, debug=DASHBOARD_DEBUG)
+    app.run(host="127.0.0.1", port=5500, debug=DASHBOARD_DEBUG)
 
