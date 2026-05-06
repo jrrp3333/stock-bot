@@ -18,6 +18,13 @@ import numpy as np
 import pandas as pd
 
 
+def _to_series(value: pd.Series | pd.DataFrame) -> pd.Series:
+    """Normalize a possibly duplicated-column selection to a 1-D numeric series."""
+    if isinstance(value, pd.DataFrame):
+        return value.iloc[:, 0].astype(float)
+    return value.astype(float)
+
+
 def _pivots(series: pd.Series, left: int = 3, right: int = 3, kind: str = "high") -> pd.Series:
     values = series.astype(float).to_numpy()
     n = len(values)
@@ -47,9 +54,9 @@ def detect_ohlc_patterns(ohlc: pd.DataFrame) -> pd.DataFrame:
     if not required.issubset(set(ohlc.columns)):
         raise ValueError("OHLC data must contain Open, High, Low, Close")
 
-    high = ohlc["High"].astype(float)
-    low = ohlc["Low"].astype(float)
-    close = ohlc["Close"].astype(float)
+    high = _to_series(ohlc["High"])
+    low = _to_series(ohlc["Low"])
+    close = _to_series(ohlc["Close"])
 
     ph = _pivots(high, left=3, right=3, kind="high")
     pl = _pivots(low, left=3, right=3, kind="low")
@@ -93,22 +100,25 @@ def detect_ohlc_patterns(ohlc: pd.DataFrame) -> pd.DataFrame:
                         bull[i] = max(bull[i], 0.90)
 
         # --- Flag continuation (heuristic)
-        window = ohlc.iloc[max(0, i - 25) : i + 1]
-        if len(window) >= 15:
-            first = float(window["Close"].iloc[0])
-            mid_peak = float(window["High"].iloc[:10].max())
-            end_close = float(window["Close"].iloc[-1])
+        start = max(0, i - 25)
+        window_close = close.iloc[start : i + 1]
+        window_high = high.iloc[start : i + 1]
+        window_low = low.iloc[start : i + 1]
+        if len(window_close) >= 15:
+            first = float(window_close.iloc[0])
+            mid_peak = float(window_high.iloc[:10].max())
+            end_close = float(window_close.iloc[-1])
             pole_up = (mid_peak / max(first, 1e-9)) - 1.0
-            pullback = (mid_peak - float(window["Low"].iloc[10:].min())) / max(mid_peak, 1e-9)
-            breakout_up = end_close > float(window["High"].iloc[-5:].max())
+            pullback = (mid_peak - float(window_low.iloc[10:].min())) / max(mid_peak, 1e-9)
+            breakout_up = end_close > float(window_high.iloc[-5:].max())
             if pole_up > 0.05 and 0.01 < pullback < 0.08 and breakout_up:
                 bull[i] = max(bull[i], 0.70)
 
-            first_low = float(window["Low"].iloc[:10].min())
-            mid_trough = float(window["Low"].iloc[:10].min())
-            pole_dn = 1.0 - (mid_trough / max(float(window["Close"].iloc[0]), 1e-9))
-            rebound = (float(window["High"].iloc[10:].max()) - mid_trough) / max(mid_trough, 1e-9)
-            breakout_dn = end_close < float(window["Low"].iloc[-5:].min())
+            first_low = float(window_low.iloc[:10].min())
+            mid_trough = float(window_low.iloc[:10].min())
+            pole_dn = 1.0 - (mid_trough / max(float(window_close.iloc[0]), 1e-9))
+            rebound = (float(window_high.iloc[10:].max()) - mid_trough) / max(mid_trough, 1e-9)
+            breakout_dn = end_close < float(window_low.iloc[-5:].min())
             if pole_dn > 0.05 and 0.01 < rebound < 0.08 and breakout_dn:
                 bear[i] = max(bear[i], 0.70)
 
