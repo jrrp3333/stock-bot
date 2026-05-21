@@ -3,4 +3,5 @@ venv/
 __pycache__/
 *.pyc
 *.log
+trades.db
 ensemble_weights.json
